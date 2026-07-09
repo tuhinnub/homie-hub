@@ -68,6 +68,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         body: JSON.stringify({ usernameOrEmail, password })
       });
 
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        throw new Error(
+          res.status === 502 || res.status === 503 || res.status === 504 || res.status === 404
+            ? 'The server is temporarily offline or restarting. Please try again in a few seconds.'
+            : 'Server returned an invalid non-JSON response.'
+        );
+      }
+
       const data = await res.json();
       if (!res.ok) {
         return { success: false, error: data.error || 'Login failed' };
@@ -92,6 +101,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, email, password, displayName })
       });
+
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        throw new Error(
+          res.status === 502 || res.status === 503 || res.status === 504 || res.status === 404
+            ? 'The server is temporarily offline or restarting. Please try again in a few seconds.'
+            : 'Server returned an invalid non-JSON response.'
+        );
+      }
 
       const data = await res.json();
       if (!res.ok) {

@@ -6,6 +6,7 @@
 import express from 'express';
 import http from 'http';
 import path from 'path';
+import fs from 'fs';
 import { Server } from 'socket.io';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
@@ -34,6 +35,21 @@ async function startServer() {
   // Express Middlewares
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+  // Request logging middleware to audit all incoming traffic
+  app.use((req, res, next) => {
+    const start = Date.now();
+    res.on('finish', () => {
+      const duration = Date.now() - start;
+      const logLine = `[${new Date().toISOString()}] ${req.method} ${req.originalUrl} - Status: ${res.statusCode} (${duration}ms) - IP: ${req.ip}\n`;
+      try {
+        fs.appendFileSync(path.join(process.cwd(), 'data', 'request_logs.txt'), logLine);
+      } catch (e) {
+        console.error('Failed to write request log:', e);
+      }
+    });
+    next();
+  });
 
   // Attempt database connection
   await connectDB();
