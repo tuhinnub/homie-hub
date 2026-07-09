@@ -1,0 +1,6 @@
+{
+  "name": "HomieHub",
+  "description": "A private social platform where friends connect, chat, share memories, and collaborate in real-time with AI-powered features.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
