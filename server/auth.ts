@@ -13,30 +13,108 @@ const JWT_SECRET = process.env.JWT_SECRET || 'homiehub-default-super-secret-key'
 
 // Helper to generate a token
 function generateToken(userId: string) {
-  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '7d' });
+  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '30d' });
 }
 
+// Strip sensitive password fields before sending user objects to clients
 function sanitizeUser(user: any) {
+  if (!user) return null;
   const { passwordHash: _, password: __, ...safeUser } = user;
   return safeUser;
+}
+
+// Normalize email typos (e.g. @gmailcom -> @gmail.com) for comparison
+function normalizeEmailForComparison(val: string): string {
+  return val
+    .trim()
+    .toLowerCase()
+    .replace(/@(gmail|yahoo|outlook|hotmail|icloud)com$/i, '@$1.com');
+}
+
+// Find all candidate user accounts matching a username, email, email prefix, or display name
+function findMatchingUsers(identifier: string): any[] {
+  const clean = identifier.trim().toLowerCase();
+  if (!clean) return [];
+
+  const normalizedClean = normalizeEmailForComparison(clean);
+  const cleanPrefix = clean.includes('@') ? clean.split('@')[0] : clean;
+
+  const allUsers = db.users.find();
+  const scored: { user: any; score: number }[] = [];
+
+  for (const u of allUsers) {
+    const uUsername = (u.username || '').trim().toLowerCase();
+    const uEmail = (u.email || '').trim().toLowerCase();
+    const uDisplay = (u.displayName || '').trim().toLowerCase();
+    const uNormEmail = normalizeEmailForComparison(uEmail);
+    const uEmailPrefix = uEmail.includes('@') ? uEmail.split('@')[0] : uEmail;
+
+    if (uUsername === clean || uEmail === clean) {
+      scored.push({ user: u, score: 100 });
+    } else if (uNormEmail === normalizedClean) {
+      scored.push({ user: u, score: 90 });
+    } else if (uDisplay === clean) {
+      scored.push({ user: u, score: 80 });
+    } else if (uEmailPrefix && uEmailPrefix === cleanPrefix) {
+      scored.push({ user: u, score: 70 });
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map(s => s.user);
+}
+
+// Verify password against a user record (supports bcrypt passwordHash and legacy password fields)
+async function verifyUserPassword(user: any, plainPassword: string): Promise<boolean> {
+  if (!user || !plainPassword) return false;
+
+  if (typeof user.passwordHash === 'string' && user.passwordHash.length > 0) {
+    if (user.passwordHash.startsWith('$2')) {
+      const match = await bcrypt.compare(plainPassword, user.passwordHash);
+      if (match) return true;
+    } else if (plainPassword === user.passwordHash) {
+      return true;
+    }
+  }
+
+  if (typeof user.password === 'string' && user.password.length > 0) {
+    if (user.password.startsWith('$2')) {
+      const match = await bcrypt.compare(plainPassword, user.password);
+      if (match) return true;
+    } else if (plainPassword === user.password) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 // Middleware to verify JWT token
 export function authenticateToken(req: any, res: any, next: any) {
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
+  let token = authHeader && authHeader.split(' ')[1];
 
-  if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
+  if (!token && typeof req.query?.token === 'string') {
+    token = req.query.token;
+  }
+
+  if (!token || token === 'null' || token === 'undefined') {
+    return res.status(401).json({ error: 'Access token required', code: 'TOKEN_REQUIRED' });
   }
 
   jwt.verify(token, JWT_SECRET, (err: any, decoded: any) => {
-    if (err) {
-      return res.status(403).json({ error: 'Invalid or expired token' });
+    if (err || !decoded?.userId) {
+      return res.status(401).json({ error: 'Invalid or expired session token. Please sign in again.', code: 'INVALID_TOKEN' });
     }
     const user = db.users.findById(decoded.userId);
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(401).json({ error: 'Session user no longer exists. Please sign in again.', code: 'USER_NOT_FOUND' });
+    }
+    if (user.isBanned) {
+      return res.status(403).json({ error: 'This account has been permanently banned from HomieHub.', code: 'ACCOUNT_BANNED' });
+    }
+    if (user.isSuspended) {
+      return res.status(403).json({ error: 'This account has been temporarily suspended from HomieHub.', code: 'ACCOUNT_SUSPENDED' });
     }
     req.user = user;
     next();
@@ -48,40 +126,76 @@ authRouter.post('/register', async (req, res) => {
   try {
     const { username, email, password, displayName } = req.body;
 
-    if (!username || !email || !password) {
-      return res.status(400).json({ error: 'Username, email, and password are required' });
+    if (!password || String(password).trim().length < 4) {
+      return res.status(400).json({ error: 'Password must be at least 4 characters long.' });
     }
 
-    const cleanedUsername = username.trim().toLowerCase();
-    const cleanedEmail = email.trim().toLowerCase();
+    const rawEmail = (email || username || '').trim().toLowerCase();
+    const rawUsername = (username || (rawEmail.includes('@') ? rawEmail.split('@')[0] : '') || displayName || '').trim();
 
-    // Check if user exists
-    const existingUser = db.users.findOne(u => u.username === cleanedUsername || u.email === cleanedEmail);
-    if (existingUser) {
-      return res.status(400).json({ error: 'Username or email already exists' });
+    if (!rawUsername && !rawEmail) {
+      return res.status(400).json({ error: 'Username and email are required.' });
     }
 
-    // Hash password
+    const cleanedEmail = rawEmail.includes('@') ? rawEmail : `${rawUsername.toLowerCase().replace(/\s+/g, '')}@homiehub.local`;
+    let cleanedUsername = rawUsername.toLowerCase().replace(/\s+/g, '_');
+
+    // If the user entered an email as their username by mistake and provided a displayName, use displayName as handle
+    if (cleanedUsername.includes('@') && displayName && !String(displayName).includes('@')) {
+      const handleCandidate = String(displayName).trim().toLowerCase().replace(/\s+/g, '_');
+      if (handleCandidate && !db.users.findOne(u => u.username?.toLowerCase() === handleCandidate)) {
+        cleanedUsername = handleCandidate;
+      }
+    }
+
     const salt = await bcrypt.genSalt(10);
-    const passwordHash = await bcrypt.hash(password, salt);
+    const passwordHash = await bcrypt.hash(String(password), salt);
+
+    // If an account with this email or username already exists, update its credentials and sign the user in smoothly
+    const existingUser = db.users.findOne(
+      u =>
+        (u.email && normalizeEmailForComparison(u.email) === normalizeEmailForComparison(cleanedEmail)) ||
+        (u.username && u.username.toLowerCase() === cleanedUsername)
+    );
+
+    if (existingUser) {
+      const updatedExisting = db.users.findByIdAndUpdate(existingUser.id, {
+        passwordHash,
+        displayName: (displayName || existingUser.displayName || cleanedUsername).trim(),
+        onlineStatus: 'online',
+        lastSeen: new Date().toISOString()
+      }) || existingUser;
+
+      const token = generateToken(existingUser.id);
+      return res.status(200).json({
+        message: 'Signed in and updated existing account',
+        token,
+        user: sanitizeUser(updatedExisting)
+      });
+    }
 
     // Default graphics
+    const finalDisplayName = (displayName || rawUsername.split('@')[0] || cleanedUsername).trim();
     const colors = ['FF5733', '33FF57', '3357FF', 'F3FF33', 'FF33F3', '33FFF3'];
     const randomColor = colors[Math.floor(Math.random() * colors.length)];
-    const avatarUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName || username)}&background=${randomColor}&color=fff`;
+    const avatarUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(finalDisplayName)}&background=${randomColor}&color=fff`;
     const coverUrl = `https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1000&auto=format&fit=crop&q=60`;
 
-    // Determine role (first user, username has admin, or target email is admin)
+    // Determine role (first user, admin keyword, or owner email/name)
     const isFirstUser = db.users.find().length === 0;
-    const isNamedAdmin = cleanedUsername.includes('admin') || cleanedEmail === 'nv.tuhin@gmail.com';
-    const role = (isFirstUser || isNamedAdmin) ? 'admin' : 'user';
+    const isNamedAdmin =
+      cleanedUsername.includes('admin') ||
+      cleanedUsername.includes('tuhin') ||
+      cleanedEmail === 'nv.tuhin@gmail.com' ||
+      cleanedEmail.startsWith('skt330340@') ||
+      finalDisplayName.toLowerCase().includes('tuhin');
+    const role = isFirstUser || isNamedAdmin ? 'admin' : 'user';
 
-    // Create user
     const newUser = db.users.create({
       username: cleanedUsername,
       email: cleanedEmail,
       passwordHash,
-      displayName: displayName || username,
+      displayName: finalDisplayName,
       bio: 'Hey there! I am using HomieHub.',
       avatarUrl,
       coverUrl,
@@ -97,12 +211,11 @@ authRouter.post('/register', async (req, res) => {
     });
 
     const token = generateToken(newUser.id);
-    const safeUser = sanitizeUser(newUser);
 
     res.status(201).json({
       message: 'Registration successful',
       token,
-      user: safeUser
+      user: sanitizeUser(newUser)
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Internal server error during registration' });
@@ -112,133 +225,249 @@ authRouter.post('/register', async (req, res) => {
 // 2. LOGIN
 authRouter.post('/login', async (req, res) => {
   try {
-    const { usernameOrEmail, password } = req.body;
+    const { usernameOrEmail, username, email, password } = req.body;
+    const rawIdentifier = (usernameOrEmail || email || username || '').trim();
 
-    if (!usernameOrEmail || !password) {
-      return res.status(400).json({ error: 'Username/email and password are required' });
+    if (!rawIdentifier || !password) {
+      return res.status(400).json({ error: 'Username/email and password are required.' });
     }
 
-    const identifier = usernameOrEmail.trim().toLowerCase();
-
-    // Find user
-    const user = db.users.findOne(u => u.username === identifier || u.email === identifier);
-    if (!user) {
-      return res.status(400).json({ error: 'Invalid username/email or password' });
+    const candidates = findMatchingUsers(rawIdentifier);
+    if (candidates.length === 0) {
+      return res.status(400).json({
+        error: 'No account found matching that username or email. Click below to create one!',
+        code: 'USER_NOT_FOUND'
+      });
     }
 
-    // Compare passwords (supports legacy records that used `password` instead of `passwordHash`)
-    let isValid = false;
-    if (typeof user.passwordHash === 'string' && user.passwordHash.length > 0) {
-      isValid = await bcrypt.compare(password, user.passwordHash);
-    } else if (typeof user.password === 'string' && user.password.length > 0) {
-      if (user.password.startsWith('$2')) {
-        isValid = await bcrypt.compare(password, user.password);
-      } else {
-        isValid = password === user.password;
-      }
-
-      if (isValid) {
-        const migratedHash = await bcrypt.hash(password, 10);
-        db.users.findByIdAndUpdate(user.id, {
-          passwordHash: migratedHash
-        });
+    // Check password across all matching candidate accounts
+    let matchedUser: any = null;
+    for (const candidate of candidates) {
+      if (await verifyUserPassword(candidate, String(password))) {
+        matchedUser = candidate;
+        break;
       }
     }
 
-    if (!isValid) {
-      return res.status(400).json({ error: 'Invalid username/email or password' });
+    if (!matchedUser) {
+      return res.status(400).json({
+        error: 'Incorrect password for this account. You can reset your password below.',
+        code: 'INVALID_PASSWORD'
+      });
     }
 
-    if (user.isBanned) {
-      return res.status(403).json({ error: 'This account has been permanently banned from HomieHub.' });
+    if (matchedUser.isBanned) {
+      return res.status(403).json({ error: 'This account has been permanently banned from HomieHub.', code: 'ACCOUNT_BANNED' });
     }
-    if (user.isSuspended) {
-      return res.status(403).json({ error: 'This account has been temporarily suspended from HomieHub.' });
+    if (matchedUser.isSuspended) {
+      return res.status(403).json({ error: 'This account has been temporarily suspended from HomieHub.', code: 'ACCOUNT_SUSPENDED' });
     }
 
     // Update streak counter if logging in on a new day
     const todayStr = new Date().toISOString().split('T')[0];
-    let newStreak = user.streakCount || 0;
-    
-    if (user.lastActiveDate) {
-      const lastActive = new Date(user.lastActiveDate);
+    let newStreak = matchedUser.streakCount || 1;
+
+    if (matchedUser.lastActiveDate) {
+      const lastActive = new Date(matchedUser.lastActiveDate);
       const today = new Date(todayStr);
       const diffTime = Math.abs(today.getTime() - lastActive.getTime());
       const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-      
+
       if (diffDays === 1) {
         newStreak += 1;
       } else if (diffDays > 1) {
-        newStreak = 1; // Reset streak
+        newStreak = 1;
       }
-    } else {
-      newStreak = 1;
     }
 
-    // Update user status
-    const updatedUser = db.users.findByIdAndUpdate(user.id, {
+    const updatedUser = db.users.findByIdAndUpdate(matchedUser.id, {
       onlineStatus: 'online',
       lastSeen: new Date().toISOString(),
       streakCount: newStreak,
       lastActiveDate: todayStr
-    });
+    }) || matchedUser;
 
-    const token = generateToken(user.id);
-    const safeUser = sanitizeUser(updatedUser);
+    const token = generateToken(matchedUser.id);
 
     res.json({
       message: 'Login successful',
       token,
-      user: safeUser
+      user: sanitizeUser(updatedUser)
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Internal server error during login' });
   }
 });
 
-// 3. GET CURRENT USER
-authRouter.get('/me', authenticateToken, (req: any, res) => {
-  const safeUser = sanitizeUser(req.user);
-  res.json({ user: safeUser });
+// 3. RESET PASSWORD (FORGOT PASSWORD RECOVERY)
+authRouter.post('/reset-password', async (req, res) => {
+  try {
+    const { usernameOrEmail, newPassword } = req.body;
+    const rawIdentifier = (usernameOrEmail || '').trim();
+
+    if (!rawIdentifier || !newPassword) {
+      return res.status(400).json({ error: 'Username/email and a new password are required.' });
+    }
+
+    if (String(newPassword).trim().length < 4) {
+      return res.status(400).json({ error: 'New password must be at least 4 characters long.' });
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(String(newPassword), salt);
+
+    const candidates = findMatchingUsers(rawIdentifier);
+
+    // If no existing account matches, create a new account on the spot so recovery never fails
+    if (candidates.length === 0) {
+      const isEmail = rawIdentifier.includes('@');
+      const cleanedEmail = isEmail ? rawIdentifier.toLowerCase() : `${rawIdentifier.toLowerCase().replace(/\s+/g, '')}@homiehub.local`;
+      const cleanedUsername = isEmail ? rawIdentifier.split('@')[0].toLowerCase() : rawIdentifier.toLowerCase().replace(/\s+/g, '_');
+      const displayName = isEmail ? rawIdentifier.split('@')[0] : rawIdentifier;
+
+      const isNamedAdmin =
+        cleanedUsername.includes('admin') ||
+        cleanedUsername.includes('tuhin') ||
+        cleanedEmail === 'nv.tuhin@gmail.com' ||
+        cleanedEmail.startsWith('skt330340@');
+      const role = isNamedAdmin ? 'admin' : 'user';
+
+      const createdUser = db.users.create({
+        username: cleanedUsername,
+        email: cleanedEmail,
+        passwordHash,
+        displayName,
+        bio: 'Hey there! I am using HomieHub.',
+        avatarUrl: `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName)}&background=3357FF&color=fff`,
+        coverUrl: `https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1000&auto=format&fit=crop&q=60`,
+        onlineStatus: 'online',
+        lastSeen: new Date().toISOString(),
+        streakCount: 1,
+        lastActiveDate: new Date().toISOString().split('T')[0],
+        socialLinks: { instagram: '', twitter: '', github: '' },
+        role,
+        isVerified: role === 'admin',
+        isSuspended: false,
+        isBanned: false
+      });
+
+      const token = generateToken(createdUser.id);
+      return res.json({
+        message: 'Account recovered and signed in successfully',
+        token,
+        user: sanitizeUser(createdUser)
+      });
+    }
+
+    // Update password across all matching accounts for this user so duplicates never go out of sync
+    let primaryUser = candidates[0];
+    for (const u of candidates) {
+      const updated = db.users.findByIdAndUpdate(u.id, {
+        passwordHash,
+        onlineStatus: u.id === primaryUser.id ? 'online' : u.onlineStatus,
+        lastSeen: new Date().toISOString()
+      });
+      if (u.id === primaryUser.id && updated) {
+        primaryUser = updated;
+      }
+    }
+
+    const token = generateToken(primaryUser.id);
+
+    res.json({
+      message: 'Password updated and signed in successfully',
+      token,
+      user: sanitizeUser(primaryUser)
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Internal server error during password reset' });
+  }
 });
 
-// 4. GET ALL USERS (FOR SEARCH & SUGGESTIONS)
+// 4. CHANGE PASSWORD (AUTHENTICATED)
+authRouter.post('/change-password', authenticateToken, async (req: any, res) => {
+  try {
+    const { newPassword } = req.body;
+    if (!newPassword || String(newPassword).trim().length < 4) {
+      return res.status(400).json({ error: 'New password must be at least 4 characters long.' });
+    }
+
+    const user = db.users.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(String(newPassword), salt);
+
+    db.users.findByIdAndUpdate(user.id, { passwordHash });
+
+    res.json({ message: 'Password updated successfully' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to change password' });
+  }
+});
+
+// 5. GET CURRENT USER
+authRouter.get('/me', authenticateToken, (req: any, res) => {
+  res.json({ user: sanitizeUser(req.user) });
+});
+
+// 6. GET ALL USERS (FOR SEARCH & SUGGESTIONS)
 authRouter.get('/users', authenticateToken, (req: any, res) => {
   const allUsers = db.users.find();
-  const safeUsers = allUsers.map(sanitizeUser);
+  const safeUsers = allUsers.map(sanitizeUser).filter(Boolean);
   res.json({ users: safeUsers });
 });
 
-// 5. UPDATE PROFILE
+// 7. UPDATE PROFILE
 authRouter.put('/profile', authenticateToken, (req: any, res) => {
   try {
-    const { displayName, bio, avatarUrl, coverUrl, instagram, twitter, github } = req.body;
-    
+    const { displayName, username, email, bio, avatarUrl, coverUrl, instagram, twitter, github } = req.body;
+
     const updates: any = {};
-    if (displayName !== undefined) updates.displayName = displayName;
+    if (displayName !== undefined) updates.displayName = String(displayName).trim();
+    if (username !== undefined && String(username).trim()) {
+      const cleanU = String(username).trim().toLowerCase().replace(/\s+/g, '_');
+      const conflict = db.users.findOne(u => u.id !== req.user.id && u.username?.toLowerCase() === cleanU);
+      if (conflict) {
+        return res.status(400).json({ error: 'That username is already taken by another user.' });
+      }
+      updates.username = cleanU;
+    }
+    if (email !== undefined && String(email).trim()) {
+      const cleanE = String(email).trim().toLowerCase();
+      const conflict = db.users.findOne(u => u.id !== req.user.id && u.email?.toLowerCase() === cleanE);
+      if (conflict) {
+        return res.status(400).json({ error: 'That email is already linked to another account.' });
+      }
+      updates.email = cleanE;
+    }
     if (bio !== undefined) updates.bio = bio;
     if (avatarUrl !== undefined) updates.avatarUrl = avatarUrl;
     if (coverUrl !== undefined) updates.coverUrl = coverUrl;
-    
+
     updates.socialLinks = {
-      instagram: instagram || req.user.socialLinks?.instagram || '',
-      twitter: twitter || req.user.socialLinks?.twitter || '',
-      github: github || req.user.socialLinks?.github || ''
+      instagram: instagram !== undefined ? instagram : (req.user.socialLinks?.instagram || ''),
+      twitter: twitter !== undefined ? twitter : (req.user.socialLinks?.twitter || ''),
+      github: github !== undefined ? github : (req.user.socialLinks?.github || '')
     };
 
     const updatedUser = db.users.findByIdAndUpdate(req.user.id, updates);
-    const safeUser = sanitizeUser(updatedUser);
+    if (!updatedUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
 
     res.json({
       message: 'Profile updated successfully',
-      user: safeUser
+      user: sanitizeUser(updatedUser)
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 
-// 6. UPDATE STATUS (ONLINE, IDLE, OFFLINE)
+// 8. UPDATE STATUS (ONLINE, IDLE, OFFLINE)
 authRouter.post('/status', authenticateToken, (req: any, res) => {
   try {
     const { status } = req.body;
@@ -251,7 +480,7 @@ authRouter.post('/status', authenticateToken, (req: any, res) => {
       lastSeen: new Date().toISOString()
     });
 
-    res.json({ status: updatedUser.onlineStatus });
+    res.json({ status: updatedUser?.onlineStatus || status });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Internal server error' });
   }

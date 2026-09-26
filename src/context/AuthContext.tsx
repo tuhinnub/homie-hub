@@ -70,15 +70,19 @@ function safeParseUser(raw: string | null): User | null {
 }
 
 async function parseJsonResponse(res: Response): Promise<any> {
-  const contentType = res.headers.get('content-type');
-  if (!contentType || !contentType.includes('application/json')) {
-    throw new Error(
-      res.status === 502 || res.status === 503 || res.status === 504
-        ? 'The server is temporarily restarting. Please try again in a few seconds.'
-        : `Unexpected server response (${res.status}). Please try again.`
-    );
+  const text = await res.text();
+  if (text) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      // Fall through to descriptive status error below if body is not valid JSON
+    }
   }
-  return res.json();
+  throw new Error(
+    res.status === 502 || res.status === 503 || res.status === 504
+      ? 'The server is temporarily restarting. Please try again in a few seconds.'
+      : `Unable to reach authentication service (${res.status}). Please try again.`
+  );
 }
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {

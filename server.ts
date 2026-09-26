@@ -73,8 +73,17 @@ async function startServer() {
     res.json({ status: 'ok', time: new Date().toISOString() });
   });
 
-  // Catch-all for unmatched /api routes so they always return JSON instead of HTML
+  // Catch-all for unmatched /api routes so they always return JSON instead of HTML.
+  // If a POST/PUT/DELETE request was converted to GET by an upstream 302 auth-bridge redirect,
+  // signal the client to immediately retry the original request.
   app.all('/api/*', (req, res) => {
+    if (req.method === 'GET') {
+      res.setHeader('X-Retry-Method', 'true');
+      return res.status(409).json({
+        error: 'Session refreshed, please retry request.',
+        retry: true
+      });
+    }
     res.status(404).json({ error: `API endpoint not found: ${req.method} ${req.originalUrl}` });
   });
 
