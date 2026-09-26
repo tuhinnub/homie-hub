@@ -16,6 +16,11 @@ function generateToken(userId: string) {
   return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '7d' });
 }
 
+function sanitizeUser(user: any) {
+  const { passwordHash: _, password: __, ...safeUser } = user;
+  return safeUser;
+}
+
 // Middleware to verify JWT token
 export function authenticateToken(req: any, res: any, next: any) {
   const authHeader = req.headers['authorization'];
@@ -92,7 +97,7 @@ authRouter.post('/register', async (req, res) => {
     });
 
     const token = generateToken(newUser.id);
-    const { passwordHash: _, ...safeUser } = newUser;
+    const safeUser = sanitizeUser(newUser);
 
     res.status(201).json({
       message: 'Registration successful',
@@ -121,8 +126,25 @@ authRouter.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Invalid username/email or password' });
     }
 
-    // Compare passwords
-    const isValid = await bcrypt.compare(password, user.passwordHash);
+    // Compare passwords (supports legacy records that used `password` instead of `passwordHash`)
+    let isValid = false;
+    if (typeof user.passwordHash === 'string' && user.passwordHash.length > 0) {
+      isValid = await bcrypt.compare(password, user.passwordHash);
+    } else if (typeof user.password === 'string' && user.password.length > 0) {
+      if (user.password.startsWith('$2')) {
+        isValid = await bcrypt.compare(password, user.password);
+      } else {
+        isValid = password === user.password;
+      }
+
+      if (isValid) {
+        const migratedHash = await bcrypt.hash(password, 10);
+        db.users.findByIdAndUpdate(user.id, {
+          passwordHash: migratedHash
+        });
+      }
+    }
+
     if (!isValid) {
       return res.status(400).json({ error: 'Invalid username/email or password' });
     }
@@ -162,7 +184,7 @@ authRouter.post('/login', async (req, res) => {
     });
 
     const token = generateToken(user.id);
-    const { passwordHash: _, ...safeUser } = updatedUser;
+    const safeUser = sanitizeUser(updatedUser);
 
     res.json({
       message: 'Login successful',
@@ -176,14 +198,14 @@ authRouter.post('/login', async (req, res) => {
 
 // 3. GET CURRENT USER
 authRouter.get('/me', authenticateToken, (req: any, res) => {
-  const { passwordHash: _, ...safeUser } = req.user;
+  const safeUser = sanitizeUser(req.user);
   res.json({ user: safeUser });
 });
 
 // 4. GET ALL USERS (FOR SEARCH & SUGGESTIONS)
 authRouter.get('/users', authenticateToken, (req: any, res) => {
   const allUsers = db.users.find();
-  const safeUsers = allUsers.map(({ passwordHash: _, ...u }) => u);
+  const safeUsers = allUsers.map(sanitizeUser);
   res.json({ users: safeUsers });
 });
 
@@ -205,7 +227,7 @@ authRouter.put('/profile', authenticateToken, (req: any, res) => {
     };
 
     const updatedUser = db.users.findByIdAndUpdate(req.user.id, updates);
-    const { passwordHash: _, ...safeUser } = updatedUser;
+    const safeUser = sanitizeUser(updatedUser);
 
     res.json({
       message: 'Profile updated successfully',
