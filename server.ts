@@ -54,6 +54,14 @@ async function startServer() {
   // Attempt database connection
   await connectDB();
 
+  // Disable caching on all API routes to prevent stale 304 auth/session responses
+  app.use('/api', (req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    next();
+  });
+
   // API Routes
   app.use('/api/auth', authRouter);
   app.use('/api/chats', chatsRouter);
@@ -63,6 +71,19 @@ async function startServer() {
   // Health check
   app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', time: new Date().toISOString() });
+  });
+
+  // Catch-all for unmatched /api routes so they always return JSON instead of HTML
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({ error: `API endpoint not found: ${req.method} ${req.originalUrl}` });
+  });
+
+  // Global JSON error handler for API routes
+  app.use('/api', (err: any, req: any, res: any, next: any) => {
+    console.error('API Error:', err);
+    res.status(err.status || 500).json({
+      error: err.message || 'Internal server error'
+    });
   });
 
   // ----------------------------------------------------

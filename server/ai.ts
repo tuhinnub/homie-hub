@@ -9,19 +9,17 @@ import { authenticateToken } from './auth.js';
 
 export const aiRouter = express.Router();
 
-// Helper to check for Gemini API key
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-
-// Lazy initialization of Gemini client
+// Lazy initialization of Gemini client (reads env dynamically after dotenv.config())
 let aiClient: GoogleGenAI | null = null;
 
 function getAIClient(): GoogleGenAI {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY environment variable is not configured. Please add it via Settings > Secrets.');
+  }
   if (!aiClient) {
-    if (!GEMINI_API_KEY) {
-      throw new Error('GEMINI_API_KEY environment variable is not configured. Please add it via Settings > Secrets.');
-    }
     aiClient = new GoogleGenAI({
-      apiKey: GEMINI_API_KEY,
+      apiKey,
       httpOptions: {
         headers: {
           'User-Agent': 'aistudio-build'
@@ -48,7 +46,7 @@ aiRouter.post('/summarize', authenticateToken, async (req, res) => {
     const prompt = `You are an expert chat companion assistant. Please provide a concise, friendly, and structured summary (bullet points) of the following chat conversation history, highlighting key decisions, action items, or plan reminders. Keep it brief:\n\n${formattedChatHistory}`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3.8-flash',
       contents: prompt
     });
 
@@ -71,7 +69,7 @@ aiRouter.post('/translate', authenticateToken, async (req, res) => {
     const prompt = `Translate the following message into ${targetLanguage}. Return ONLY the direct translation, preserving the tone, slang, or emojis if present. Do not include quotes or conversational preambles:\n\n${text}`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3.8-flash',
       contents: prompt
     });
 
@@ -98,7 +96,7 @@ aiRouter.post('/suggest-replies', authenticateToken, async (req, res) => {
     const prompt = `Based on the following short chat exchange, suggest 3 quick, short, and highly conversational response replies. They should sound natural, trendy, and casual. Provide the output as a simple JSON array of strings. Do not wrap in markdown code blocks, just return the raw JSON array. For example: ["Haha awesome!", "No way, details!", "I'm down!"]\n\nContext:\n${formattedContext}`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3.8-flash',
       contents: prompt
     });
 
@@ -130,7 +128,7 @@ aiRouter.post('/analyze-safety', authenticateToken, async (req, res) => {
     const prompt = `Analyze the following private chat message for toxicity (hate speech, severe insults, harassment) and spam (unsolicited advertisements, repetitive scams). Respond ONLY in valid JSON format with three boolean keys: "isToxic", "isSpam", and a brief "reason" string (empty if safe). Do not include markdown wraps:\n\nMessage: "${text}"`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3.8-flash',
       contents: prompt
     });
 
@@ -159,8 +157,7 @@ aiRouter.post('/chatbot', authenticateToken, async (req, res) => {
     }
 
     const ai = getAIClient();
-    
-    // Construct chat state
+
     const historyParts = chatHistory ? chatHistory.map((h: any) => ({
       role: h.role === 'user' ? 'user' : 'model',
       parts: [{ text: h.text }]
@@ -174,7 +171,7 @@ aiRouter.post('/chatbot', authenticateToken, async (req, res) => {
     const systemInstruction = "You are HomieAI, the virtual companion inside HomieHub. You are part of the friend group—chill, friendly, slightly witty, and highly helpful. You use casual language and emojis, keeping answers short, playful, and incredibly warm. You can help coordinate plans, suggest movies or games, outline to-do lists, settle friendly debates, or just vibe with the user.";
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3.8-flash',
       contents: historyParts,
       config: {
         systemInstruction
@@ -197,17 +194,38 @@ aiRouter.post('/caption', authenticateToken, async (req, res) => {
     }
 
     const ai = getAIClient();
-    
-    // Extract base64 image data or download public image
-    // For simplicity inside our client-server sandbox, let's assume client sends a base64 string
-    const base64Data = imageUrl.split(',')[1] || imageUrl;
+
+    let base64Data = '';
+    let mimeType = 'image/jpeg';
+
+    if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
+      const imgRes = await fetch(imageUrl);
+      if (!imgRes.ok) {
+        throw new Error('Failed to fetch remote image for caption generation.');
+      }
+      const contentType = imgRes.headers.get('content-type');
+      if (contentType && contentType.startsWith('image/')) {
+        mimeType = contentType.split(';')[0];
+      }
+      const arrayBuf = await imgRes.arrayBuffer();
+      base64Data = Buffer.from(arrayBuf).toString('base64');
+    } else if (imageUrl.includes(',')) {
+      const [header, data] = imageUrl.split(',');
+      base64Data = data;
+      const match = header.match(/data:(image\/[a-zA-Z0-9.+-]+);base64/);
+      if (match) {
+        mimeType = match[1];
+      }
+    } else {
+      base64Data = imageUrl;
+    }
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3.8-flash',
       contents: [
         {
           inlineData: {
-            mimeType: 'image/png',
+            mimeType,
             data: base64Data
           }
         },

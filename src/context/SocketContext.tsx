@@ -70,7 +70,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     const socketUrl = window.location.origin;
     const newSocket = io(socketUrl, {
-      transports: ['websocket'],
+      transports: ['polling', 'websocket'],
       autoConnect: true,
     });
 
@@ -191,7 +191,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   // ----------------------------------------------------
 
   const sendMessage = (chatId: string, content: string, type = 'text', mediaUrl?: string, mediaName?: string, replyToId?: string) => {
-    if (!socket || !user) return;
+    if (!user) return;
 
     const mockMsg: Message = {
       id: Math.random().toString(36).substr(2, 9),
@@ -208,10 +208,14 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       createdAt: new Date().toISOString()
     };
 
-    // Emit live message to Socket.IO
-    socket.emit('send-message', mockMsg);
+    // Emit live message to Socket.IO if connected, otherwise add locally
+    if (socket && socket.connected) {
+      socket.emit('send-message', mockMsg);
+    } else {
+      setIncomingMessages(prev => [...prev, mockMsg]);
+    }
 
-    // Persist on database asynchronously
+    // Persist on database asynchronously with matching ID
     fetch(`/api/chats/${chatId}/messages`, {
       method: 'POST',
       headers: {
@@ -219,6 +223,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         Authorization: `Bearer ${token}`
       },
       body: JSON.stringify({
+        id: mockMsg.id,
         content,
         messageType: type,
         mediaUrl,

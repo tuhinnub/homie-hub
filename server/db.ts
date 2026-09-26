@@ -141,6 +141,55 @@ export async function connectDB() {
 // Local Persistent JSON Database Implementation
 // ----------------------------------------------------
 
+const DEFAULT_DB_STATE: Record<string, any[]> = {
+  users: [],
+  messages: [],
+  chats: [],
+  stories: [],
+  calls: [],
+  events: [],
+  todos: [],
+  polls: [],
+  reports: [],
+  logs: [],
+  featureFlags: []
+};
+
+let memoryDbCache: Record<string, any[]> | null = null;
+
+function getDbState(): Record<string, any[]> {
+  if (memoryDbCache) {
+    return memoryDbCache;
+  }
+  try {
+    if (fs.existsSync(DB_FILE)) {
+      const raw = fs.readFileSync(DB_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      memoryDbCache = { ...DEFAULT_DB_STATE, ...parsed };
+      return memoryDbCache;
+    }
+  } catch (err) {
+    console.error('Failed to read db.json, initializing from defaults:', err);
+  }
+  memoryDbCache = { ...DEFAULT_DB_STATE };
+  return memoryDbCache;
+}
+
+function persistDbState() {
+  if (!memoryDbCache) return;
+  try {
+    const tmpFile = `${DB_FILE}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(memoryDbCache, null, 2), 'utf-8');
+    fs.renameSync(tmpFile, DB_FILE);
+  } catch (err) {
+    try {
+      fs.writeFileSync(DB_FILE, JSON.stringify(memoryDbCache, null, 2), 'utf-8');
+    } catch (writeErr) {
+      console.error('Failed to persist database:', writeErr);
+    }
+  }
+}
+
 class LocalCollection<T extends { id: string }> {
   private key: string;
 
@@ -149,22 +198,17 @@ class LocalCollection<T extends { id: string }> {
   }
 
   private read(): T[] {
-    try {
-      const data = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
-      return data[this.key] || [];
-    } catch {
-      return [];
+    const state = getDbState();
+    if (!Array.isArray(state[this.key])) {
+      state[this.key] = [];
     }
+    return state[this.key] as T[];
   }
 
   private write(items: T[]) {
-    try {
-      const data = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
-      data[this.key] = items;
-      fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
-    } catch (err) {
-      console.error(`Failed to write database key: ${this.key}`, err);
-    }
+    const state = getDbState();
+    state[this.key] = items;
+    persistDbState();
   }
 
   find(queryFn?: (item: T) => boolean): T[] {

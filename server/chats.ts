@@ -144,7 +144,7 @@ chatsRouter.get('/:chatId/messages', authenticateToken, (req: any, res) => {
 chatsRouter.post('/:chatId/messages', authenticateToken, (req: any, res) => {
   try {
     const { chatId } = req.params;
-    const { content, messageType, mediaUrl, mediaName, replyToId } = req.body;
+    const { id, content, messageType, mediaUrl, mediaName, replyToId } = req.body;
     const userId = req.user.id;
 
     const chat = db.chats.findById(chatId);
@@ -165,6 +165,7 @@ chatsRouter.post('/:chatId/messages', authenticateToken, (req: any, res) => {
     }
 
     const newMessage = db.messages.create({
+      id,
       chatId,
       senderId: userId,
       content,

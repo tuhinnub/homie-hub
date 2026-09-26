@@ -76,6 +76,7 @@ export interface Chat {
   lastMessage?: Message;
   pinnedMessages?: string[]; // Message IDs
   unreadCounts: { [userId: string]: number };
+  unreadCount?: number;
   createdAt: string;
 }
 

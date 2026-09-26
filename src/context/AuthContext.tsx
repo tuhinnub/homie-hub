@@ -6,12 +6,21 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User } from '../types.js';
 
+interface AuthResult {
+  success: boolean;
+  error?: string;
+  code?: string;
+  message?: string;
+}
+
 interface AuthContextType {
   user: User | null;
   token: string | null;
   isLoading: boolean;
-  login: (usernameOrEmail: string, password: string) => Promise<{ success: boolean; error?: string }>;
-  register: (username: string, email: string, password: string, displayName?: string) => Promise<{ success: boolean; error?: string }>;
+  login: (usernameOrEmail: string, password: string) => Promise<AuthResult>;
+  register: (username: string, email: string, password: string, displayName?: string) => Promise<AuthResult>;
+  resetPassword: (usernameOrEmail: string, newPassword: string) => Promise<AuthResult>;
+  changePassword: (currentPassword: string, newPassword: string) => Promise<AuthResult>;
   logout: () => void;
   updateProfile: (data: Partial<User> & { instagram?: string; twitter?: string; github?: string }) => Promise<boolean>;
   updateStatus: (status: 'online' | 'idle' | 'offline') => Promise<void>;
@@ -20,117 +29,240 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+// Safe localStorage helpers for iframe environments
+function safeGetStorage(key: string): string | null {
+  try {
+    const val = localStorage.getItem(key);
+    if (!val || val === 'undefined' || val === 'null') return null;
+    return val;
+  } catch {
+    return null;
+  }
+}
+
+function safeSetStorage(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Ignore storage quota or iframe partitioning errors
+  }
+}
+
+function safeRemoveStorage(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+function safeParseUser(raw: string | null): User | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && parsed.id) {
+      return parsed as User;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function parseJsonResponse(res: Response): Promise<any> {
+  const contentType = res.headers.get('content-type');
+  if (!contentType || !contentType.includes('application/json')) {
+    throw new Error(
+      res.status === 502 || res.status === 503 || res.status === 504
+        ? 'The server is temporarily restarting. Please try again in a few seconds.'
+        : `Unexpected server response (${res.status}). Please try again.`
+    );
+  }
+  return res.json();
+}
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Check for existing session
-  useEffect(() => {
-    const storedToken = localStorage.getItem('homiehub_token');
-    const storedUser = localStorage.getItem('homiehub_user');
+  const persistSession = (newToken: string, newUser: User) => {
+    setToken(newToken);
+    setUser(newUser);
+    safeSetStorage('homiehub_token', newToken);
+    safeSetStorage('homiehub_user', JSON.stringify(newUser));
+  };
 
-    if (storedToken && storedUser) {
-      setToken(storedToken);
-      setUser(JSON.parse(storedUser));
-      
-      // Fetch fresh profile in the background
-      fetch('/api/auth/me', {
-        headers: { Authorization: `Bearer ${storedToken}` }
-      })
-        .then(res => {
-          if (res.ok) return res.json();
-          throw new Error('Session expired');
-        })
-        .then(data => {
-          setUser(data.user);
-          localStorage.setItem('homiehub_user', JSON.stringify(data.user));
-        })
-        .catch(() => {
-          // Token expired or server unreachable
-          localStorage.removeItem('homiehub_token');
-          localStorage.removeItem('homiehub_user');
-          setToken(null);
-          setUser(null);
-        })
-        .finally(() => setIsLoading(false));
-    } else {
+  const clearSession = () => {
+    setToken(null);
+    setUser(null);
+    safeRemoveStorage('homiehub_token');
+    safeRemoveStorage('homiehub_user');
+  };
+
+  // Check for existing session on mount
+  useEffect(() => {
+    const storedToken = safeGetStorage('homiehub_token');
+    const storedUser = safeParseUser(safeGetStorage('homiehub_user'));
+
+    if (!storedToken) {
+      clearSession();
       setIsLoading(false);
+      return;
     }
+
+    if (storedUser) {
+      setToken(storedToken);
+      setUser(storedUser);
+    }
+
+    // Verify token and fetch fresh profile
+    fetch('/api/auth/me', {
+      headers: {
+        Authorization: `Bearer ${storedToken}`,
+        'Cache-Control': 'no-cache'
+      }
+    })
+      .then(async res => {
+        if (res.ok) {
+          const data = await parseJsonResponse(res);
+          if (data?.user) {
+            persistSession(storedToken, data.user);
+          }
+          return;
+        }
+        if (res.status === 401 || res.status === 403 || res.status === 404) {
+          clearSession();
+        }
+      })
+      .catch(() => {
+        // Keep cached session if only a transient network hiccup occurred and storedUser exists
+        if (!storedUser) {
+          clearSession();
+        }
+      })
+      .finally(() => setIsLoading(false));
   }, []);
 
   // 1. LOGIN
-  const login = async (usernameOrEmail: string, password: string) => {
+  const login = async (usernameOrEmail: string, password: string): Promise<AuthResult> => {
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ usernameOrEmail, password })
+        body: JSON.stringify({ usernameOrEmail: usernameOrEmail.trim(), password })
       });
 
-      const contentType = res.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-        throw new Error(
-          res.status === 502 || res.status === 503 || res.status === 504 || res.status === 404
-            ? 'The server is temporarily offline or restarting. Please try again in a few seconds.'
-            : 'Server returned an invalid non-JSON response.'
-        );
-      }
-
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       if (!res.ok) {
-        return { success: false, error: data.error || 'Login failed' };
+        return {
+          success: false,
+          error: data.error || 'Login failed. Please check your credentials.',
+          code: data.code
+        };
       }
 
-      setToken(data.token);
-      setUser(data.user);
-      localStorage.setItem('homiehub_token', data.token);
-      localStorage.setItem('homiehub_user', JSON.stringify(data.user));
-
-      return { success: true };
+      if (data.token && data.user) {
+        persistSession(data.token, data.user);
+        return { success: true, message: data.message };
+      }
+      return { success: false, error: 'Invalid authentication response from server.' };
     } catch (err: any) {
-      return { success: false, error: err.message || 'Network error' };
+      return { success: false, error: err.message || 'Network error while signing in.' };
     }
   };
 
   // 2. REGISTER
-  const register = async (username: string, email: string, password: string, displayName?: string) => {
+  const register = async (
+    username: string,
+    email: string,
+    password: string,
+    displayName?: string
+  ): Promise<AuthResult> => {
     try {
       const res = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, email, password, displayName })
+        body: JSON.stringify({
+          username: username.trim(),
+          email: email.trim(),
+          password,
+          displayName: displayName?.trim()
+        })
       });
 
-      const contentType = res.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-        throw new Error(
-          res.status === 502 || res.status === 503 || res.status === 504 || res.status === 404
-            ? 'The server is temporarily offline or restarting. Please try again in a few seconds.'
-            : 'Server returned an invalid non-JSON response.'
-        );
-      }
-
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       if (!res.ok) {
-        return { success: false, error: data.error || 'Registration failed' };
+        return {
+          success: false,
+          error: data.error || 'Registration failed.',
+          code: data.code
+        };
       }
 
-      setToken(data.token);
-      setUser(data.user);
-      localStorage.setItem('homiehub_token', data.token);
-      localStorage.setItem('homiehub_user', JSON.stringify(data.user));
+      if (data.token && data.user) {
+        persistSession(data.token, data.user);
+        return { success: true, message: data.message };
+      }
+      return { success: false, error: 'Invalid registration response from server.' };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Network error during registration.' };
+    }
+  };
 
-      return { success: true };
+  // 3. RESET PASSWORD
+  const resetPassword = async (usernameOrEmail: string, newPassword: string): Promise<AuthResult> => {
+    try {
+      const res = await fetch('/api/auth/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ usernameOrEmail: usernameOrEmail.trim(), newPassword })
+      });
+
+      const data = await parseJsonResponse(res);
+      if (!res.ok) {
+        return {
+          success: false,
+          error: data.error || 'Password reset failed.',
+          code: data.code
+        };
+      }
+
+      if (data.token && data.user) {
+        persistSession(data.token, data.user);
+        return { success: true, message: data.message };
+      }
+      return { success: false, error: 'Invalid response from server.' };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Network error during password reset.' };
+    }
+  };
+
+  // 4. CHANGE PASSWORD
+  const changePassword = async (currentPassword: string, newPassword: string): Promise<AuthResult> => {
+    if (!token) return { success: false, error: 'Not authenticated' };
+    try {
+      const res = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ currentPassword, newPassword })
+      });
+      const data = await parseJsonResponse(res);
+      if (!res.ok) {
+        return { success: false, error: data.error || 'Failed to update password' };
+      }
+      return { success: true, message: data.message };
     } catch (err: any) {
       return { success: false, error: err.message || 'Network error' };
     }
   };
 
-  // 3. LOGOUT
+  // 5. LOGOUT
   const logout = () => {
     if (user && token) {
-      // Try to let server know we're offline
       fetch('/api/auth/status', {
         method: 'POST',
         headers: {
@@ -141,13 +273,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }).catch(() => {});
     }
 
-    setToken(null);
-    setUser(null);
-    localStorage.removeItem('homiehub_token');
-    localStorage.removeItem('homiehub_user');
+    clearSession();
   };
 
-  // 4. UPDATE PROFILE
+  // 6. UPDATE PROFILE
   const updateProfile = async (data: Partial<User> & { instagram?: string; twitter?: string; github?: string }) => {
     if (!token) return false;
     try {
@@ -161,10 +290,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       });
 
       if (res.ok) {
-        const result = await res.json();
-        setUser(result.user);
-        localStorage.setItem('homiehub_user', JSON.stringify(result.user));
-        return true;
+        const result = await parseJsonResponse(res);
+        if (result?.user) {
+          persistSession(token, result.user);
+          return true;
+        }
       }
       return false;
     } catch {
@@ -172,7 +302,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  // 5. UPDATE STATUS
+  // 7. UPDATE STATUS
   const updateStatus = async (status: 'online' | 'idle' | 'offline') => {
     if (!token || !user) return;
     try {
@@ -185,13 +315,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         body: JSON.stringify({ status })
       });
       if (res.ok) {
-        const result = await res.json();
-        setUser(prev => prev ? { ...prev, onlineStatus: result.status } : null);
+        const result = await parseJsonResponse(res);
+        setUser(prev => {
+          if (!prev) return null;
+          const updated = { ...prev, onlineStatus: result.status };
+          safeSetStorage('homiehub_user', JSON.stringify(updated));
+          return updated;
+        });
       }
     } catch {}
   };
 
-  // 6. SEARCH USERS
+  // 8. SEARCH USERS
   const searchUsers = async (): Promise<User[]> => {
     if (!token) return [];
     try {
@@ -199,8 +334,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         headers: { Authorization: `Bearer ${token}` }
       });
       if (res.ok) {
-        const data = await res.json();
-        return data.users;
+        const data = await parseJsonResponse(res);
+        return data.users || [];
       }
       return [];
     } catch {
@@ -209,7 +344,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, login, register, logout, updateProfile, updateStatus, searchUsers }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        token,
+        isLoading,
+        login,
+        register,
+        resetPassword,
+        changePassword,
+        logout,
+        updateProfile,
+        updateStatus,
+        searchUsers
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

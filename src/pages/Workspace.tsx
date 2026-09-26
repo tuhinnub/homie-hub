@@ -16,7 +16,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 
 export const Workspace: React.FC = () => {
-  const { user, token, logout, updateProfile, updateStatus, searchUsers } = useAuth();
+  const { user, token, logout, updateProfile, changePassword, updateStatus, searchUsers } = useAuth();
   const { 
     socket, sendMessage, sendTyping, sendStopTyping, typingUsers, incomingMessages, clearIncomingMessages,
     callState, initiateCall, acceptCall, declineCall, endCall, localVideoRef, remoteVideoRef
@@ -83,12 +83,30 @@ export const Workspace: React.FC = () => {
 
   // Settings State
   const [editDisplayName, setEditDisplayName] = useState(user?.displayName || '');
+  const [editUsername, setEditUsername] = useState(user?.username || '');
+  const [editEmail, setEditEmail] = useState(user?.email || '');
   const [editBio, setEditBio] = useState(user?.bio || '');
   const [editAvatar, setEditAvatar] = useState(user?.avatarUrl || '');
   const [editCover, setEditCover] = useState(user?.coverUrl || '');
   const [editInsta, setEditInsta] = useState(user?.socialLinks?.instagram || '');
   const [editTwitter, setEditTwitter] = useState(user?.socialLinks?.twitter || '');
   const [editGit, setEditGit] = useState(user?.socialLinks?.github || '');
+  const [newAccountPassword, setNewAccountPassword] = useState('');
+  const [profileFeedback, setProfileFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  useEffect(() => {
+    if (user) {
+      setEditDisplayName(user.displayName || '');
+      setEditUsername(user.username || '');
+      setEditEmail(user.email || '');
+      setEditBio(user.bio || '');
+      setEditAvatar(user.avatarUrl || '');
+      setEditCover(user.coverUrl || '');
+      setEditInsta(user.socialLinks?.instagram || '');
+      setEditTwitter(user.socialLinks?.twitter || '');
+      setEditGit(user.socialLinks?.github || '');
+    }
+  }, [user]);
 
   // Admin Panel States
   const [adminTab, setAdminTab] = useState<'overview' | 'users' | 'moderation' | 'flags' | 'logs'>('overview');
@@ -174,6 +192,10 @@ export const Workspace: React.FC = () => {
   const fetchChats = async () => {
     try {
       const res = await fetch('/api/chats/list', { headers: { Authorization: `Bearer ${token}` } });
+      if (res.status === 401) {
+        logout();
+        return;
+      }
       if (res.ok) {
         const data = await res.json();
         setChats(data.chats);
@@ -384,8 +406,11 @@ export const Workspace: React.FC = () => {
   // ----------------------------------------------------
 
   const handleSaveProfile = async () => {
+    setProfileFeedback(null);
     const success = await updateProfile({
       displayName: editDisplayName,
+      username: editUsername,
+      email: editEmail,
       bio: editBio,
       avatarUrl: editAvatar,
       coverUrl: editCover,
@@ -393,10 +418,20 @@ export const Workspace: React.FC = () => {
       twitter: editTwitter,
       github: editGit
     });
+
+    if (newAccountPassword.trim()) {
+      const pwRes = await changePassword('', newAccountPassword.trim());
+      if (!pwRes.success) {
+        setProfileFeedback({ type: 'error', text: pwRes.error || 'Failed to update password.' });
+        return;
+      }
+      setNewAccountPassword('');
+    }
+
     if (success) {
-      alert('Profile updated successfully!');
+      setProfileFeedback({ type: 'success', text: 'Profile and account credentials updated successfully!' });
     } else {
-      alert('Failed to update profile.');
+      setProfileFeedback({ type: 'error', text: 'Failed to update profile. Username or email may already be in use.' });
     }
   };
 
@@ -496,7 +531,6 @@ export const Workspace: React.FC = () => {
   };
 
   const handleDeleteUser = async (userId: string) => {
-    if (!confirm('Are you sure you want to delete this user account permanently? This action is irreversible.')) return;
     try {
       const res = await fetch(`/api/admin/users/${userId}`, {
         method: 'DELETE',
@@ -2268,17 +2302,49 @@ export const Workspace: React.FC = () => {
 
                 {/* Profile Card Fields */}
                 <div className="glass-card rounded-2xl p-6 space-y-4">
-                  <p className="text-[10px] font-mono text-cyan-400 font-bold uppercase tracking-wider">Card Details</p>
+                  <p className="text-[10px] font-mono text-cyan-400 font-bold uppercase tracking-wider">Card Details & Credentials</p>
                   
                   <div className="space-y-4">
-                    <div>
-                      <label className="text-xs font-semibold text-gray-400 font-mono">DISPLAY NAME</label>
-                      <input
-                        type="text"
-                        value={editDisplayName}
-                        onChange={(e) => setEditDisplayName(e.target.value)}
-                        className="w-full glass-input rounded-xl px-4 py-2.5 mt-2 text-sm"
-                      />
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-xs font-semibold text-gray-400 font-mono">DISPLAY NAME</label>
+                        <input
+                          type="text"
+                          value={editDisplayName}
+                          onChange={(e) => setEditDisplayName(e.target.value)}
+                          className="w-full glass-input rounded-xl px-4 py-2.5 mt-2 text-sm"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-semibold text-gray-400 font-mono">USERNAME HANDLE</label>
+                        <input
+                          type="text"
+                          value={editUsername}
+                          onChange={(e) => setEditUsername(e.target.value)}
+                          className="w-full glass-input rounded-xl px-4 py-2.5 mt-2 text-sm font-mono"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-xs font-semibold text-gray-400 font-mono">EMAIL ADDRESS</label>
+                        <input
+                          type="email"
+                          value={editEmail}
+                          onChange={(e) => setEditEmail(e.target.value)}
+                          className="w-full glass-input rounded-xl px-4 py-2.5 mt-2 text-sm"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-semibold text-gray-400 font-mono">NEW PASSWORD (OPTIONAL)</label>
+                        <input
+                          type="password"
+                          placeholder="Leave blank to keep current password"
+                          value={newAccountPassword}
+                          onChange={(e) => setNewAccountPassword(e.target.value)}
+                          className="w-full glass-input rounded-xl px-4 py-2.5 mt-2 text-sm"
+                        />
+                      </div>
                     </div>
                     <div>
                       <label className="text-xs font-semibold text-gray-400 font-mono">BIO DETAILS</label>
@@ -2329,6 +2395,19 @@ export const Workspace: React.FC = () => {
                     </div>
                   </div>
                 </div>
+
+                {profileFeedback && (
+                  <div className={`p-4 rounded-2xl border text-xs font-medium flex items-center justify-between ${
+                    profileFeedback.type === 'success'
+                      ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+                      : 'bg-red-500/10 border-red-500/20 text-red-400'
+                  }`}>
+                    <span>{profileFeedback.text}</span>
+                    <button onClick={() => setProfileFeedback(null)} className="text-gray-400 hover:text-gray-200">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
 
                 <button
                   onClick={handleSaveProfile}
