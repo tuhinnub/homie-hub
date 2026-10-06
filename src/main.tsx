@@ -28,26 +28,32 @@ if (typeof window !== 'undefined' && typeof window.fetch === 'function') {
       cache: 'no-store'
     };
 
-    let response = await originalFetch(input, finalInit);
+    const maxRetries = 2;
+    let response: Response | null = null;
 
-    // If an upstream 302 auth-bridge redirect converted a POST/PUT/PATCH/DELETE into a GET
-    // (causing a 409/404 or redirected response) or returned an HTML auth-check page,
-    // the redirect has now warmed the proxy cache—immediately retry the original request.
-    const contentType = response.headers.get('content-type') || '';
-    const isHtmlResponse = !contentType.includes('application/json');
-    const shouldRetry =
-      response.redirected ||
-      response.status === 409 ||
-      response.headers.get('x-retry-method') === 'true' ||
-      (method !== 'GET' && response.status === 404) ||
-      (isHtmlResponse && response.status !== 502 && response.status !== 503 && response.status !== 504);
-
-    if (shouldRetry) {
-      await originalFetch('/api/health', { cache: 'no-store', credentials: 'same-origin' }).catch(() => {});
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
       response = await originalFetch(input, finalInit);
+
+      // If an upstream 302 auth-bridge redirect converted a POST/PUT/PATCH/DELETE into a GET
+      // (causing a 409/404 or redirected response) or returned an HTML auth-check page,
+      // warm the proxy cache and retry the original request.
+      const contentType = response.headers.get('content-type') || '';
+      const isHtmlResponse = !contentType.includes('application/json');
+      const shouldRetry =
+        response.redirected ||
+        response.status === 409 ||
+        response.headers.get('x-retry-method') === 'true' ||
+        (method !== 'GET' && response.status === 404) ||
+        (isHtmlResponse && response.status !== 502 && response.status !== 503 && response.status !== 504);
+
+      if (!shouldRetry || attempt === maxRetries) {
+        return response;
+      }
+
+      await originalFetch('/api/health', { cache: 'no-store', credentials: 'same-origin' }).catch(() => {});
     }
 
-    return response;
+    return response!;
   };
 }
 
