@@ -3,15 +3,15 @@
     {
       "username": "tuhin",
       "email": "skt330340@gmail.com",
-      "passwordHash": "$2b$10$8mkYckAXedotS.GHuFjbO.YfdNUlSon11sVDALrMLF9JUbv6vi7I6",
+      "passwordHash": "$2b$10$wyXQzXwRtPiDsv5HLXx90e12mFEu5e5ofEqm/sMRr9c0SV/4o43K6",
       "displayName": "Tuhin",
       "bio": "Hey there! I am using HomieHub.",
       "avatarUrl": "https://ui-avatars.com/api/?name=Tuhin&background=F3FF33&color=fff",
       "coverUrl": "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1000&auto=format&fit=crop&q=60",
       "onlineStatus": "online",
-      "lastSeen": "2026-09-26T05:46:11.793Z",
+      "lastSeen": "2026-10-06T05:56:57.481Z",
       "streakCount": 1,
-      "lastActiveDate": "2026-09-26",
+      "lastActiveDate": "2026-10-06",
       "socialLinks": {
         "instagram": "",
         "twitter": "",
@@ -23,18 +23,18 @@
       "isBanned": false,
       "id": "2g6lk0u51",
       "createdAt": "2026-09-26T05:02:18.754Z",
-      "updatedAt": "2026-09-26T05:46:11.793Z"
+      "updatedAt": "2026-10-06T05:56:57.481Z"
     },
     {
       "username": "tuhin_alt",
       "email": "skt330340@gmailcom",
-      "passwordHash": "$2b$10$OjUx3sKjz.4Dn/rgJoutNuTeGQtq7MLSfZkd1bwJx3o526/hZlWDa",
+      "passwordHash": "$2b$10$wyXQzXwRtPiDsv5HLXx90e12mFEu5e5ofEqm/sMRr9c0SV/4o43K6",
       "displayName": "Tuhin",
       "bio": "Hey there! I am using HomieHub.",
       "avatarUrl": "https://ui-avatars.com/api/?name=Tuhin&background=33FF57&color=fff",
       "coverUrl": "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1000&auto=format&fit=crop&q=60",
       "onlineStatus": "offline",
-      "lastSeen": "2026-09-26T05:27:20.646Z",
+      "lastSeen": "2026-10-06T05:56:57.395Z",
       "streakCount": 1,
       "lastActiveDate": "2026-09-26",
       "socialLinks": {
@@ -48,7 +48,7 @@
       "isBanned": false,
       "id": "2so4jzcte",
       "createdAt": "2026-09-26T05:24:41.284Z",
-      "updatedAt": "2026-09-26T05:27:20.647Z"
+      "updatedAt": "2026-10-06T05:56:57.395Z"
     }
   ],
   "messages": [],
